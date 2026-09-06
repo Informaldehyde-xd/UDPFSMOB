@@ -197,8 +197,10 @@ class UdpfsHandlers(
         val sectorNr = (u32(payload, 12) shl 32) or (u32(payload, 8) and 0xFFFFFFFFL)
         try {
             val data = backend.bread(handle, sectorNr, sectorCount, conn.dataBuffer)
+            FileLogger.d(TAG, "[${conn.peerAddr}]: BREAD handle=$handle sectorNr=$sectorNr sectorCount=$sectorCount -> ${data.size} bytes")
             conn.sendReadResult(data.size, data)
         } catch (e: Exception) {
+            FileLogger.w(TAG, "[${conn.peerAddr}]: BREAD handle=$handle sectorNr=$sectorNr sectorCount=$sectorCount failed", e)
             conn.sendReadResult(-errorToErrno(e), null)
         }
     }

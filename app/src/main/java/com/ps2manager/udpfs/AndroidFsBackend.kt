@@ -1,10 +1,5 @@
 /* Real filesystem backend — serves UDPFS requests against a folder on the
- * phone's storage using java.io, the same approach as SMBOPL's OplDiskDriver.
- *
- * NOTE: raw block-device mode (BREAD/BWRITE) is intentionally unsupported —
- * that mode expects a raw disk image device, not a file-backed share, and is
- * out of scope for v1. Regular file access (OPEN/READ/WRITE/DREAD/GETSTAT/etc.)
- * covers folder-based PS2 game loading, which is the actual use case here. */
+ * phone's storage using java.io, the same approach as SMBOPL's OplDiskDriver. */
 package com.ps2manager.udpfsserver.udpfs
 
 import java.io.File
@@ -13,6 +8,12 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 
 class AndroidFsBackend(private val rootDir: File) : UdpfsBackend {
+
+    companion object {
+        // PS2 optical media (CD and DVD alike) use 2048-byte logical sectors —
+        // the standard ISO9660 sector size BREAD/BWRITE address by.
+        private const val SECTOR_SIZE = 2048L
+    }
 
     private sealed class Handle {
         class RegularFile(val raf: RandomAccessFile, var writeState: WriteState? = null) : Handle()
@@ -147,11 +148,22 @@ class AndroidFsBackend(private val rootDir: File) : UdpfsBackend {
     }
 
     override fun bread(handle: Int, sectorNr: Long, sectorCount: Int, readBuffer: ByteArray): ByteArray {
-        throw UdpfsErrno(Errno.ENODEV)
+        val h = handles[handle] as? Handle.RegularFile ?: throw UdpfsErrno(Errno.EBADF)
+        val offset = sectorNr * SECTOR_SIZE
+        val requested = sectorCount.toLong() * SECTOR_SIZE
+        val remaining = h.raf.length() - offset
+        if (remaining <= 0) return ByteArray(0)
+        val toRead = minOf(requested, remaining, readBuffer.size.toLong()).toInt()
+        h.raf.seek(offset)
+        val n = h.raf.read(readBuffer, 0, toRead)
+        if (n <= 0) return ByteArray(0)
+        return readBuffer.copyOf(n)
     }
 
     override fun bwriteStart(handle: Int, sectorNr: Long, sectorCount: Int) {
-        throw UdpfsErrno(Errno.ENODEV)
+        val h = handles[handle] as? Handle.RegularFile ?: throw UdpfsErrno(Errno.EBADF)
+        h.raf.seek(sectorNr * SECTOR_SIZE)
+        h.writeState = WriteState()
     }
 
     private fun statFor(file: File): StatInfo =
