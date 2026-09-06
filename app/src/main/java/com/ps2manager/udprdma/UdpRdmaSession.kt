@@ -21,6 +21,14 @@ class UdpRdmaSession(
     companion object {
         private const val TAG = "UdpRdmaSession"
         private const val RING_SIZE = 2048
+        // Modulo shares one running counter across discovery + data packets. When
+        // it starts a new logical exchange mid-session (e.g. resuming BREAD access
+        // for ISO boot after an idle gap), its counter restarts near 0 rather than
+        // continuing from wherever this session's rxSeqExpected had climbed to —
+        // and it doesn't always land exactly on 0. Treat any low incoming sequence
+        // number below this threshold, while far behind our current expectation,
+        // as a restart rather than corruption/reordering.
+        private const val RESTART_SEQ_THRESHOLD = 16
     }
 
     private class TxPacket(var data: ByteArray, var seq: Int)
@@ -407,9 +415,10 @@ class UdpRdmaSession(
                     if (retransmit) onPeerNackLocked(retransmitFrom)
                     return null
                 }
-                if (hdr.seqNr == 0) {
-                    FileLogger.w(TAG, "[$peerAddr]: got unexpected sequence number 0, assuming the peer was reset")
+                if (hdr.seqNr == 0 || (hdr.seqNr < rxSeqExpected && hdr.seqNr <= RESTART_SEQ_THRESHOLD)) {
+                    FileLogger.w(TAG, "[$peerAddr]: got unexpectedly low sequence number ${hdr.seqNr} (expected $rxSeqExpected), assuming the peer restarted its counter")
                     resetSessionLocked()
+                    rxSeqInitialized = true
                 } else {
                     FileLogger.w(TAG, "[$peerAddr]: got unexpected sequence number ${hdr.seqNr} (expected $rxSeqExpected)")
                     sendAckLocked(false)
