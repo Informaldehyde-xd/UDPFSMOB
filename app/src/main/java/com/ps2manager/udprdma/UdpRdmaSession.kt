@@ -53,7 +53,11 @@ class UdpRdmaSession(
     private val transfer = Transfer()
 
     private var txSeqNr = 2
-    private var txSeqNrAcked = 0xFFF
+    // Sentinel meaning "nothing ACKed yet". Must always be (txSeqNr's starting
+    // value - 1) so inFlightLocked()'s modular math is correct — txSeqNr starts
+    // at 2 (see comment below), so this is 1, not the more obvious-looking 0xFFF
+    // (which would only be correct if txSeqNr started at 0).
+    private var txSeqNrAcked = 1
     private var rxSeqExpected = 0
     private var rxSeqInitialized = false
 
@@ -90,7 +94,7 @@ class UdpRdmaSession(
 
     private fun resetSessionLocked() {
         txSeqNr = 2
-        txSeqNrAcked = 0xFFF
+        txSeqNrAcked = 1
         txReadIndex = 0
         txWriteIndex = 0
         rxSeqExpected = 0
