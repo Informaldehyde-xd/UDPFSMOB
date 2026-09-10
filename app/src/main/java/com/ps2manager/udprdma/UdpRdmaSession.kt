@@ -16,7 +16,13 @@ class UdpRdmaSession(
     val peerAddr: InetSocketAddress,
     private val scheduler: ScheduledExecutorService,
     private val writeTo: (InetSocketAddress, ByteArray) -> Unit,
-    private val writeBatch: ((InetSocketAddress, List<ByteArray>) -> Unit)? = null
+    private val writeBatch: ((InetSocketAddress, List<ByteArray>) -> Unit)? = null,
+    // Modulo's IOP-side receive buffer can only hold a couple of packets in
+    // flight before it stalls silently (never NACKs, just stops ACKing) —
+    // observed directly: it ACKed exactly 2 of 6 packets in a BREAD response
+    // and hung. The reference Go server's SEND_WINDOW=8 assumes a receiver
+    // that can buffer far more, so callers cap this per-peer for Modulo.
+    private val sendWindow: Int = UdpRdmaConst.SEND_WINDOW
 ) {
     companion object {
         private const val TAG = "UdpRdmaSession"
@@ -152,8 +158,8 @@ class UdpRdmaSession(
     }
 
     private fun handleTransferLocked() {
-        val batch = ArrayList<ByteArray>(UdpRdmaConst.SEND_WINDOW)
-        while (transfer.data != null && inFlightLocked() < UdpRdmaConst.SEND_WINDOW) {
+        val batch = ArrayList<ByteArray>(sendWindow)
+        while (transfer.data != null && inFlightLocked() < sendWindow) {
             val hdr = transfer.header
             if (transfer.offset == 0 && hdr != null && hdr.isNotEmpty()) {
                 var firstDataMax = transfer.maxChunk
@@ -188,7 +194,7 @@ class UdpRdmaSession(
 
     private fun handleAckTimeoutLocked() {
         val waitingFin = finPending
-        val waitingWindow = !finPending && transfer.data != null && inFlightLocked() >= UdpRdmaConst.SEND_WINDOW
+        val waitingWindow = !finPending && transfer.data != null && inFlightLocked() >= sendWindow
         if (!waitingFin && !waitingWindow) { stopAckTimer(); return }
 
         retransmitAttempts++
@@ -232,7 +238,7 @@ class UdpRdmaSession(
     }
 
     private fun retransmitFromLocked(fromSeq: Int): Int {
-        val batch = ArrayList<ByteArray>(UdpRdmaConst.SEND_WINDOW)
+        val batch = ArrayList<ByteArray>(sendWindow)
         var i = txReadIndex
         while (i != txWriteIndex) {
             val p = txBuffer[i]
@@ -318,7 +324,7 @@ class UdpRdmaSession(
 
     private fun updateAckTimerLocked() {
         if (inFlightLocked() == 0) { stopAckTimer(); return }
-        if (finPending || (transfer.data != null && inFlightLocked() >= UdpRdmaConst.SEND_WINDOW)) {
+        if (finPending || (transfer.data != null && inFlightLocked() >= sendWindow)) {
             armAckTimerLocked()
             return
         }
