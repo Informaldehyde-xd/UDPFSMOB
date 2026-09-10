@@ -47,6 +47,10 @@ class UdpfsSocketServer(
         private const val TAG = "UdpfsSocketServer"
         private const val PEER_CLEANUP_INTERVAL_MS = 30_000L
         private const val MAX_PACKET_SIZE = 2048
+        // Modulo's receive buffer stalls (stops ACKing, no NACK) once more than a
+        // couple of packets are in flight — observed directly in a BREAD transfer
+        // where it ACKed exactly 2 of 6 packets and hung. See UdpRdmaSession.
+        private const val MODULO_SEND_WINDOW = 2
     }
 
     private class Peer(val connection: UdpfsConnection, val handlers: UdpfsHandlers, var lastSeenMs: Long)
@@ -214,7 +218,10 @@ class UdpfsSocketServer(
                     FileLogger.w(TAG, "write error to $a", e)
                 }
             }
-            val session = UdpRdmaSession(addr, scheduler, writeTo)
+            val session = UdpRdmaSession(
+                addr, scheduler, writeTo,
+                sendWindow = if (moduloMode) MODULO_SEND_WINDOW else UdpRdmaConst.SEND_WINDOW
+            )
             val connection = UdpfsConnection(addr, session, backend, verbose)
             Peer(connection, UdpfsHandlers(connection, backend), System.currentTimeMillis())
         }
