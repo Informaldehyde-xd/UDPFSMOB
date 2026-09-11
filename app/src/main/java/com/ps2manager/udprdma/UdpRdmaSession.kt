@@ -17,11 +17,10 @@ class UdpRdmaSession(
     private val scheduler: ScheduledExecutorService,
     private val writeTo: (InetSocketAddress, ByteArray) -> Unit,
     private val writeBatch: ((InetSocketAddress, List<ByteArray>) -> Unit)? = null,
-    // Modulo's IOP-side receive buffer can only hold a couple of packets in
-    // flight before it stalls silently (never NACKs, just stops ACKing) —
-    // observed directly: it ACKed exactly 2 of 6 packets in a BREAD response
-    // and hung. The reference Go server's SEND_WINDOW=8 assumes a receiver
-    // that can buffer far more, so callers cap this per-peer for Modulo.
+    // Overridable per-peer, but the default (UdpRdmaConst.SEND_WINDOW=8) matches
+    // the reference server exactly and applies uniformly — real Modulo traffic
+    // that looked like a small hard buffer cap turned out to be the ACK-wait
+    // timeout giving up too early (see MAX_RETRANSMITS), not a window-size issue.
     private val sendWindow: Int = UdpRdmaConst.SEND_WINDOW
 ) {
     companion object {

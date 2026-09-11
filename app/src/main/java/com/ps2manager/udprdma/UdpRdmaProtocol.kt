@@ -9,9 +9,14 @@ object UdpRdmaConst {
 
     const val SEND_WINDOW = 8
     const val MAX_DATA_PAYLOAD = 1408
-    const val FIN_ACK_TIMEOUT_MS = 500L
+    // Matches the reference server's WINDOW_ACK_TIMEOUT=0.1s / MAX_WINDOW_RETRIES=200
+    // exactly: real IOP hardware needs up to ~20s of tolerance waiting for a window
+    // ACK, not the few hundred ms this used to allow. Giving up early here was
+    // mistaken for a buffer-capacity problem, when it was actually just impatience —
+    // the client was still going to ACK, given enough time.
+    const val FIN_ACK_TIMEOUT_MS = 100L
     const val WINDOW_ACK_TIMEOUT_MS = 100L
-    const val MAX_RETRANSMITS = 4
+    const val MAX_RETRANSMITS = 200
 
     const val PACKET_DISCOVERY = 0
     const val PACKET_INFORM = 1
