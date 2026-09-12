@@ -86,22 +86,22 @@ class UdpRdmaSession(
 
     /** Called on every DISCOVERY packet from this peer, matching the actual
      * Modulo-compatible reference server (udpfs_server.py _handle_discovery)
-     * exactly: rx expectation resyncs to the discovery packet's own
-     * (shared) counter, and the tx "acked" pointer resyncs to just behind
-     * the current tx counter — forgiving any pending unacked backlog. This
-     * runs unconditionally on every discovery ping, not just the first,
-     * since Modulo's client shares one counter across discovery and data
-     * and can restart that counter mid-session (e.g. after an idle period)
-     * without the server needing to guess a "restart" from a suspiciously
-     * low incoming data sequence number. txSeqNr itself is left untouched —
-     * it never resets for the life of the peer's connection. */
+     * exactly: BOTH counters resync on every discovery ping, not just the
+     * rx expectation — the client's own NACKs after a discovery-triggered
+     * exchange explicitly requested seq=2 even when this session's txSeqNr
+     * had legitimately climbed into the 40s from earlier browsing, proving
+     * the client expects our outgoing numbering to restart at 2 (the
+     * INFORM=1→next=2 convention) on every discovery too, not just the
+     * very first one. This runs unconditionally on every discovery ping,
+     * not just the first, since Modulo's client shares one counter across
+     * discovery and data and can restart that counter mid-session (e.g.
+     * after an idle period) without the server needing to guess a
+     * "restart" from a suspiciously low incoming data sequence number. */
     fun onDiscovery(discoverySeqNr: Int) {
         lock.lock()
         try {
+            resetSessionLocked()
             rxSeqExpected = (discoverySeqNr + 1) and 0xFFF
-            txSeqNrAcked = (txSeqNr - 1) and 0xFFF
-            stopAckTimer()
-            retransmitAttempts = 0
         } finally { lock.unlock() }
     }
 
@@ -304,11 +304,23 @@ class UdpRdmaSession(
     }
 
     private fun optimalChunkSize(totalBytes: Int): Int {
+        // Matches reference _optimal_chunk_size exactly, including the tie-break:
+        // prefer better DMA alignment (smaller chunk) when packet counts are equal.
+        val candidates = arrayOf(
+            Pair(1024, 512),
+            Pair(1280, 256),
+            Pair(UdpRdmaConst.MAX_DATA_PAYLOAD, 128)
+        )
         var bestChunk = UdpRdmaConst.MAX_DATA_PAYLOAD
         var bestPackets = ceil(totalBytes / UdpRdmaConst.MAX_DATA_PAYLOAD.toDouble()).toInt()
-        for (maxChunk in intArrayOf(1024, 1280, UdpRdmaConst.MAX_DATA_PAYLOAD)) {
+        var bestAlign = 128
+        for ((maxChunk, alignment) in candidates) {
             val packets = ceil(totalBytes / maxChunk.toDouble()).toInt()
-            if (packets < bestPackets) { bestPackets = packets; bestChunk = maxChunk }
+            if (packets < bestPackets || (packets == bestPackets && alignment > bestAlign)) {
+                bestPackets = packets
+                bestChunk = maxChunk
+                bestAlign = alignment
+            }
         }
         return bestChunk
     }
@@ -383,6 +395,12 @@ class UdpRdmaSession(
     }
 
     private fun onPeerNackLocked(seq: Int) {
+        // Matches reference _handle_data's NACK branch exactly: the NACK's
+        // seq_nr_ack is the peer's next-expected seq, so everything before
+        // it is implicitly acked — update the pointer before retransmitting
+        // so in-flight/window accounting (inFlightLocked) stays correct.
+        txSeqNrAcked = (seq - 1) and 0xFFF
+        pruneAckedLocked(seq)
         retransmitAttempts = 0
         val sent = retransmitFromLocked(seq)
         if (sent == 0) FileLogger.w(TAG, "[$peerAddr]: NACK retransmit from $seq sent 0 packets")
