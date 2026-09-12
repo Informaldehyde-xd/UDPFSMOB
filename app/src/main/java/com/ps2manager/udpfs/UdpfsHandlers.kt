@@ -3,12 +3,25 @@
 package com.ps2manager.udpfsserver.udpfs
 
 import com.ps2manager.udpfsserver.FileLogger
+import com.ps2manager.udpfsserver.udprdma.UdpRdmaConst
 
 class UdpfsHandlers(
     private val conn: UdpfsConnection,
     private val backend: UdpfsBackend
 ) {
-    companion object { private const val TAG = "UdpfsHandlers" }
+    companion object {
+        private const val TAG = "UdpfsHandlers"
+        // Empirically, this Modulo build's UDPFS driver reliably ACKs replies
+        // up to 2 network packets, and never once ACKs a single reply beyond
+        // that regardless of retry budget (tested up to 29s of retries) —
+        // every 2-packet-or-fewer reply we've sent has succeeded, every
+        // reply needing 3+ packets has stalled identically. Cap replies to
+        // fit in 2 packets and report a short count; any well-behaved reader
+        // (this one included, since it already re-requests for real short
+        // reads at EOF) issues a follow-up request for the remainder.
+        private const val SECTOR_SIZE = 2048
+        private const val MAX_SHORT_READ_BYTES = 2 * UdpRdmaConst.MAX_DATA_PAYLOAD - 8
+    }
 
     fun handlePayload(payload: ByteArray) {
         if (payload.isEmpty()) return
@@ -85,7 +98,12 @@ class UdpfsHandlers(
     private fun handleRead(payload: ByteArray) {
         if (payload.size < 12) { conn.sendReadResult(-Errno.EINVAL, null); return }
         val handle = i32(payload, 4)
-        val size = u32(payload, 8).toInt()
+        val requestedSize = u32(payload, 8).toInt()
+        // See MAX_SHORT_READ_BYTES: this build of Modulo can only reliably
+        // receive ~2 packets per single reply. Cap the read and report the
+        // short count — any well-behaved reader treats that as a normal
+        // short read and issues a follow-up READ_REQ for the remainder.
+        val size = minOf(requestedSize, MAX_SHORT_READ_BYTES)
         try {
             val result = backend.read(handle, size, conn.dataBuffer)
             conn.sendReadResult(result.n, result.data)
@@ -192,12 +210,17 @@ class UdpfsHandlers(
 
     private fun handleBread(payload: ByteArray) {
         if (payload.size < 16) { conn.sendReadResult(-Errno.EINVAL, null); return }
-        val sectorCount = u16(payload, 2)
+        val requestedSectorCount = u16(payload, 2)
         val handle = i32(payload, 4)
         val sectorNr = (u32(payload, 12) shl 32) or (u32(payload, 8) and 0xFFFFFFFFL)
+        // Same short-read cap as handleRead — see MAX_SHORT_READ_BYTES. Clip
+        // to whole sectors so callers doing sector-aligned block I/O still
+        // get sector-aligned data back.
+        val maxSectors = maxOf(1, MAX_SHORT_READ_BYTES / SECTOR_SIZE)
+        val sectorCount = minOf(requestedSectorCount, maxSectors)
         try {
             val data = backend.bread(handle, sectorNr, sectorCount, conn.dataBuffer)
-            FileLogger.d(TAG, "[${conn.peerAddr}]: BREAD handle=$handle sectorNr=$sectorNr sectorCount=$sectorCount -> ${data.size} bytes")
+            FileLogger.d(TAG, "[${conn.peerAddr}]: BREAD handle=$handle sectorNr=$sectorNr requested=$requestedSectorCount served=$sectorCount -> ${data.size} bytes")
             conn.sendReadResult(data.size, data)
         } catch (e: Exception) {
             FileLogger.w(TAG, "[${conn.peerAddr}]: BREAD handle=$handle sectorNr=$sectorNr sectorCount=$sectorCount failed", e)

@@ -26,6 +26,10 @@ class UdpfsConnection(
 
     fun processIncoming(data: ByteArray): ByteArray? = session.processDataPacket(data, data.size)
 
+    /** Resyncs the session on a DISCOVERY packet from this peer — see
+     *  UdpRdmaSession.onDiscovery. */
+    fun onDiscovery(discoverySeqNr: Int) = session.onDiscovery(discoverySeqNr)
+
     fun sendAck(ack: Boolean) = session.sendAck(ack)
     fun sendOpenReply(handle: Int, st: StatInfo) = session.sendData(UdpfsPacking.packOpenReply(handle, st))
     fun sendReadResult(result: Int, data: ByteArray?) =
