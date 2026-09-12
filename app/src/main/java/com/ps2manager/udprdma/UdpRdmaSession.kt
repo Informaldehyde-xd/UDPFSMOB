@@ -18,22 +18,16 @@ class UdpRdmaSession(
     private val writeTo: (InetSocketAddress, ByteArray) -> Unit,
     private val writeBatch: ((InetSocketAddress, List<ByteArray>) -> Unit)? = null,
     // Overridable per-peer, but the default (UdpRdmaConst.SEND_WINDOW=8) matches
-    // the reference server exactly and applies uniformly — real Modulo traffic
-    // that looked like a small hard buffer cap turned out to be the ACK-wait
-    // timeout giving up too early (see MAX_RETRANSMITS), not a window-size issue.
+    // the actual Modulo-compatible reference server exactly. The real fix for
+    // replies that stalled after 2 packets was capping reply size at the UDPFS
+    // layer (see UdpfsHandlers.MAX_SHORT_READ_BYTES) — this window controls how
+    // many packets of a capped-size reply may be in flight at once, not how much
+    // data a single reply may contain.
     private val sendWindow: Int = UdpRdmaConst.SEND_WINDOW
 ) {
     companion object {
         private const val TAG = "UdpRdmaSession"
         private const val RING_SIZE = 2048
-        // Modulo shares one running counter across discovery + data packets. When
-        // it starts a new logical exchange mid-session (e.g. resuming BREAD access
-        // for ISO boot after an idle gap), its counter restarts near 0 rather than
-        // continuing from wherever this session's rxSeqExpected had climbed to —
-        // and it doesn't always land exactly on 0. Treat any low incoming sequence
-        // number below this threshold, while far behind our current expectation,
-        // as a restart rather than corruption/reordering.
-        private const val RESTART_SEQ_THRESHOLD = 16
     }
 
     private class TxPacket(var data: ByteArray, var seq: Int)
@@ -58,7 +52,6 @@ class UdpRdmaSession(
     // (which would only be correct if txSeqNr started at 0).
     private var txSeqNrAcked = 1
     private var rxSeqExpected = 0
-    private var rxSeqInitialized = false
 
     private var ackFuture: ScheduledFuture<*>? = null
     private var ackTimerExpectSeq = 0
@@ -91,13 +84,33 @@ class UdpRdmaSession(
         try { resetSessionLocked() } finally { lock.unlock() }
     }
 
+    /** Called on every DISCOVERY packet from this peer, matching the actual
+     * Modulo-compatible reference server (udpfs_server.py _handle_discovery)
+     * exactly: rx expectation resyncs to the discovery packet's own
+     * (shared) counter, and the tx "acked" pointer resyncs to just behind
+     * the current tx counter — forgiving any pending unacked backlog. This
+     * runs unconditionally on every discovery ping, not just the first,
+     * since Modulo's client shares one counter across discovery and data
+     * and can restart that counter mid-session (e.g. after an idle period)
+     * without the server needing to guess a "restart" from a suspiciously
+     * low incoming data sequence number. txSeqNr itself is left untouched —
+     * it never resets for the life of the peer's connection. */
+    fun onDiscovery(discoverySeqNr: Int) {
+        lock.lock()
+        try {
+            rxSeqExpected = (discoverySeqNr + 1) and 0xFFF
+            txSeqNrAcked = (txSeqNr - 1) and 0xFFF
+            stopAckTimer()
+            retransmitAttempts = 0
+        } finally { lock.unlock() }
+    }
+
     private fun resetSessionLocked() {
         txSeqNr = 2
         txSeqNrAcked = 1
         txReadIndex = 0
         txWriteIndex = 0
         rxSeqExpected = 0
-        rxSeqInitialized = false
         stopAckTimer()
         retransmitAttempts = 0
         finPending = false
@@ -402,17 +415,12 @@ class UdpRdmaSession(
                 return null
             }
 
-            // Modulo shares one running counter across discovery + data packets,
-            // so a new session's first data packet often doesn't start at 0 like
-            // a spec-compliant client's would. Sync to whatever the peer sends
-            // as the baseline instead of assuming 0, but only for the very first
-            // data-bearing packet of this session.
-            if (!rxSeqInitialized) {
-                rxSeqInitialized = true
-                rxSeqExpected = hdr.seqNr
-                FileLogger.i(TAG, "[$peerAddr]: first data packet, syncing rxSeqExpected to peer's seq ${hdr.seqNr}")
-            }
-
+            // No special-casing needed here for a brand-new session or a
+            // mid-session "restart" — onDiscovery() already resyncs
+            // rxSeqExpected (and forgives any pending tx backlog) on every
+            // discovery packet, which always precedes real data packets
+            // from this client. A genuine mismatch here is either a
+            // duplicate retransmit or real corruption/reordering.
             if (hdr.seqNr != rxSeqExpected) {
                 val prevSeq = (rxSeqExpected - 1) and 0xFFF
                 if (hdr.seqNr == prevSeq) {
@@ -424,16 +432,10 @@ class UdpRdmaSession(
                     if (retransmit) onPeerNackLocked(retransmitFrom)
                     return null
                 }
-                if (hdr.seqNr == 0 || (hdr.seqNr < rxSeqExpected && hdr.seqNr <= RESTART_SEQ_THRESHOLD)) {
-                    FileLogger.w(TAG, "[$peerAddr]: got unexpectedly low sequence number ${hdr.seqNr} (expected $rxSeqExpected), assuming the peer restarted its counter")
-                    resetSessionLocked()
-                    rxSeqInitialized = true
-                } else {
-                    FileLogger.w(TAG, "[$peerAddr]: got unexpected sequence number ${hdr.seqNr} (expected $rxSeqExpected)")
-                    sendAckLocked(false)
-                    if (isAck) onPeerAckLocked(header.seqNrAck)
-                    return null
-                }
+                FileLogger.w(TAG, "[$peerAddr]: got unexpected sequence number ${hdr.seqNr} (expected $rxSeqExpected)")
+                sendAckLocked(false)
+                if (isAck) onPeerAckLocked(header.seqNrAck)
+                return null
             }
 
             rxSeqExpected = (hdr.seqNr + 1) and 0xFFF

@@ -14,9 +14,17 @@ object UdpRdmaConst {
     // ACK, not the few hundred ms this used to allow. Giving up early here was
     // mistaken for a buffer-capacity problem, when it was actually just impatience —
     // the client was still going to ACK, given enough time.
+    // Matches the actual Modulo-compatible reference server exactly
+    // (udpfs_server.py: WINDOW_ACK_TIMEOUT=0.1, MAX_WINDOW_RETRIES=4,
+    // comment: "matches IOP"). An earlier attempt raised this to 200 based
+    // on a *different*, more general Neutrino reference server — but tested
+    // against real Modulo traffic, waiting longer never helped: packets
+    // beyond the 2nd in a reply were never ACKed even after 29+ seconds of
+    // retries. The real fix is capping reply size (see UdpfsHandlers), not
+    // patience — so this reverts to the value the actual client expects.
     const val FIN_ACK_TIMEOUT_MS = 100L
     const val WINDOW_ACK_TIMEOUT_MS = 100L
-    const val MAX_RETRANSMITS = 200
+    const val MAX_RETRANSMITS = 4
 
     const val PACKET_DISCOVERY = 0
     const val PACKET_INFORM = 1
