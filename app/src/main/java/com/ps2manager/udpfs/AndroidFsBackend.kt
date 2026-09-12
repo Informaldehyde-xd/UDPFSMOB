@@ -12,7 +12,13 @@ class AndroidFsBackend(private val rootDir: File) : UdpfsBackend {
     companion object {
         // PS2 optical media (CD and DVD alike) use 2048-byte logical sectors —
         // the standard ISO9660 sector size BREAD/BWRITE address by.
-        private const val SECTOR_SIZE = 2048L
+        // Matches the reference server exactly: BREAD/BWRITE against a
+        // regular file handle (anything other than the reserved block-device
+        // handle 0, which this share-folder backend never uses) addresses
+        // 512-byte sectors — NOT the 2048-byte CD/DVD sector size. Using
+        // 2048 here silently served data from 4x the wrong file offset,
+        // in 4x the wrong quantity, for every BREAD request.
+        private const val SECTOR_SIZE = 512L
     }
 
     private sealed class Handle {
