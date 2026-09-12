@@ -126,6 +126,8 @@ class UdpfsSocketServer(
                 val replyPacket = DatagramPacket(reply, reply.size, packet.address, packet.port)
                 dataSocket?.send(replyPacket) // sent FROM the data socket on purpose
                 FileLogger.i(TAG, "[${packet.address}:${packet.port}]: discovery request received, replied INFORM from data port $dataPort hex=${FileLogger.hex(reply)}")
+                val addr = InetSocketAddress(packet.address, packet.port)
+                dataSocket?.let { onDiscoveryFrom(it, addr, RdmaHeader.unpack(packet.data).seqNr) }
             } catch (e: SocketException) {
                 if (running) FileLogger.e(TAG, "discovery socket error", e)
                 return
@@ -187,6 +189,8 @@ class UdpfsSocketServer(
                     val replyPacket = DatagramPacket(reply, reply.size, packet.address, packet.port)
                     socket.send(replyPacket) // same socket on purpose — Modulo never leaves this port
                     FileLogger.i(TAG, "[${packet.address}:${packet.port}]: discovery request received (modulo mode), replied hex=${FileLogger.hex(reply)}")
+                    val addr = InetSocketAddress(packet.address, packet.port)
+                    onDiscoveryFrom(socket, addr, RdmaHeader.unpack(packet.data).seqNr)
                 } else {
                     val addr = InetSocketAddress(packet.address, packet.port)
                     val data = packet.data.copyOfRange(0, packet.length)
@@ -204,7 +208,23 @@ class UdpfsSocketServer(
 
     private fun handleData(socket: DatagramSocket, data: ByteArray, addr: InetSocketAddress) {
         val isNewPeer = !peers.containsKey(addr)
-        val peer = peers.getOrPut(addr) {
+        val peer = getOrCreatePeer(socket, addr)
+        peer.lastSeenMs = System.currentTimeMillis()
+
+        val payload = peer.connection.processIncoming(data)
+        if (isNewPeer) {
+            FileLogger.d(TAG, "[$addr]: processIncoming -> payload=${if (payload == null) "null (ctrl packet, e.g. ACK/NACK)" else "${payload.size} bytes hex=${FileLogger.hex(payload)}"}")
+        }
+        if (payload != null) {
+            peer.handlers.handlePayload(payload)
+        }
+    }
+
+    /** Gets or creates this peer's session/connection state. Shared by both
+     *  data-packet handling and discovery handling, since discovery packets
+     *  must resync an EXISTING peer's session too (see UdpRdmaSession.onDiscovery). */
+    private fun getOrCreatePeer(socket: DatagramSocket, addr: InetSocketAddress): Peer {
+        return peers.getOrPut(addr) {
             FileLogger.i(TAG, "[$addr]: creating new connection")
             val writeTo: (InetSocketAddress, ByteArray) -> Unit = { a, payload ->
                 try {
@@ -218,15 +238,15 @@ class UdpfsSocketServer(
             val connection = UdpfsConnection(addr, session, backend, verbose)
             Peer(connection, UdpfsHandlers(connection, backend), System.currentTimeMillis())
         }
-        peer.lastSeenMs = System.currentTimeMillis()
+    }
 
-        val payload = peer.connection.processIncoming(data)
-        if (isNewPeer) {
-            FileLogger.d(TAG, "[$addr]: processIncoming -> payload=${if (payload == null) "null (ctrl packet, e.g. ACK/NACK)" else "${payload.size} bytes hex=${FileLogger.hex(payload)}"}")
-        }
-        if (payload != null) {
-            peer.handlers.handlePayload(payload)
-        }
+    /** Resyncs this peer's session on every discovery packet — see
+     *  UdpRdmaSession.onDiscovery for why this must run unconditionally,
+     *  not just for a peer's first-ever discovery. */
+    private fun onDiscoveryFrom(socket: DatagramSocket, addr: InetSocketAddress, discoverySeqNr: Int) {
+        val peer = getOrCreatePeer(socket, addr)
+        peer.lastSeenMs = System.currentTimeMillis()
+        peer.connection.onDiscovery(discoverySeqNr)
     }
 
     private fun cleanupPeers() {
