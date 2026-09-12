@@ -15,7 +15,7 @@ class UdpfsHandlers(
     fun handlePayload(payload: ByteArray) {
         if (payload.isEmpty()) return
         val msgType = payload[0].toInt() and 0xFF
-        FileLogger.i(TAG, "[${conn.peerAddr}]: dispatching msgType=0x${msgType.toString(16)} (${UdpfsMsg.name(msgType)}) payloadLen=${payload.size} hex=${FileLogger.hex(payload)}")
+        if (conn.verbose) FileLogger.i(TAG, "[${conn.peerAddr}]: dispatching msgType=0x${msgType.toString(16)} (${UdpfsMsg.name(msgType)}) payloadLen=${payload.size} hex=${FileLogger.hex(payload)}")
         when (msgType) {
             UdpfsMsg.OPEN_REQ -> handleOpen(payload)
             UdpfsMsg.CLOSE_REQ -> handleClose(payload)
@@ -199,7 +199,7 @@ class UdpfsHandlers(
         val sectorNr = (u32(payload, 12) shl 32) or (u32(payload, 8) and 0xFFFFFFFFL)
         try {
             val data = backend.bread(handle, sectorNr, sectorCount, conn.dataBuffer)
-            FileLogger.d(TAG, "[${conn.peerAddr}]: BREAD handle=$handle sectorNr=$sectorNr sectorCount=$sectorCount -> ${data.size} bytes")
+            if (conn.verbose) FileLogger.d(TAG, "[${conn.peerAddr}]: BREAD handle=$handle sectorNr=$sectorNr sectorCount=$sectorCount -> ${data.size} bytes")
             conn.sendReadResult(data.size, data)
         } catch (e: Exception) {
             FileLogger.w(TAG, "[${conn.peerAddr}]: BREAD handle=$handle sectorNr=$sectorNr sectorCount=$sectorCount failed", e)
