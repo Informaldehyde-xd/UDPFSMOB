@@ -112,9 +112,9 @@ class UdpfsSocketServer(
             try {
                 val packet = DatagramPacket(buf, buf.size)
                 socket.receive(packet)
-                FileLogger.d(TAG, "disc recv [${packet.address}:${packet.port}] len=${packet.length} hex=${FileLogger.hex(packet.data, packet.length)}")
+                if (verbose) FileLogger.d(TAG, "disc recv [${packet.address}:${packet.port}] len=${packet.length} hex=${FileLogger.hex(packet.data, packet.length)}")
                 if (packet.length < 6) {
-                    FileLogger.w(TAG, "disc: packet too short (${packet.length} bytes), dropping")
+                    if (verbose) FileLogger.w(TAG, "disc: packet too short (${packet.length} bytes), dropping")
                     continue
                 }
 
@@ -125,7 +125,7 @@ class UdpfsSocketServer(
                 }
                 val replyPacket = DatagramPacket(reply, reply.size, packet.address, packet.port)
                 dataSocket?.send(replyPacket) // sent FROM the data socket on purpose
-                FileLogger.i(TAG, "[${packet.address}:${packet.port}]: discovery request received, replied INFORM from data port $dataPort hex=${FileLogger.hex(reply)}")
+                if (verbose) FileLogger.i(TAG, "[${packet.address}:${packet.port}]: discovery request received, replied INFORM from data port $dataPort hex=${FileLogger.hex(reply)}")
                 val addr = InetSocketAddress(packet.address, packet.port)
                 dataSocket?.let { onDiscoveryFrom(it, addr, RdmaHeader.unpack(packet.data).seqNr) }
             } catch (e: SocketException) {
@@ -145,9 +145,9 @@ class UdpfsSocketServer(
             try {
                 val packet = DatagramPacket(buf, buf.size)
                 socket.receive(packet)
-                FileLogger.d(TAG, "data recv [${packet.address}:${packet.port}] len=${packet.length} hex=${FileLogger.hex(packet.data, packet.length)}")
+                if (verbose) FileLogger.d(TAG, "data recv [${packet.address}:${packet.port}] len=${packet.length} hex=${FileLogger.hex(packet.data, packet.length)}")
                 if (packet.length < 6) {
-                    FileLogger.w(TAG, "data: packet too short (${packet.length} bytes), dropping")
+                    if (verbose) FileLogger.w(TAG, "data: packet too short (${packet.length} bytes), dropping")
                     continue
                 }
 
@@ -172,29 +172,29 @@ class UdpfsSocketServer(
             try {
                 val packet = DatagramPacket(buf, buf.size)
                 socket.receive(packet)
-                FileLogger.d(TAG, "modulo recv [${packet.address}:${packet.port}] len=${packet.length} hex=${FileLogger.hex(packet.data, packet.length)}")
+                if (verbose) FileLogger.d(TAG, "modulo recv [${packet.address}:${packet.port}] len=${packet.length} hex=${FileLogger.hex(packet.data, packet.length)}")
                 if (packet.length < 6) {
-                    FileLogger.w(TAG, "modulo: packet too short (${packet.length} bytes), dropping")
+                    if (verbose) FileLogger.w(TAG, "modulo: packet too short (${packet.length} bytes), dropping")
                     continue
                 }
 
                 val packetType = RdmaHeader.unpack(packet.data).packetType
-                FileLogger.d(TAG, "modulo: parsed packetType=$packetType")
+                if (verbose) FileLogger.d(TAG, "modulo: parsed packetType=$packetType")
                 if (packetType == UdpRdmaConst.PACKET_DISCOVERY) {
                     val reply = processDiscoveryPacket(packet.data, packet.length, UdpRdmaConst.SERVICE_UDPFS)
                     if (reply == null) {
-                        FileLogger.w(TAG, "modulo: DISCOVERY packet failed validation (wrong serviceId or too short) from ${packet.address}:${packet.port}")
+                        if (verbose) FileLogger.w(TAG, "modulo: DISCOVERY packet failed validation (wrong serviceId or too short) from ${packet.address}:${packet.port}")
                         continue
                     }
                     val replyPacket = DatagramPacket(reply, reply.size, packet.address, packet.port)
                     socket.send(replyPacket) // same socket on purpose — Modulo never leaves this port
-                    FileLogger.i(TAG, "[${packet.address}:${packet.port}]: discovery request received (modulo mode), replied hex=${FileLogger.hex(reply)}")
+                    if (verbose) FileLogger.i(TAG, "[${packet.address}:${packet.port}]: discovery request received (modulo mode), replied hex=${FileLogger.hex(reply)}")
                     val addr = InetSocketAddress(packet.address, packet.port)
                     onDiscoveryFrom(socket, addr, RdmaHeader.unpack(packet.data).seqNr)
                 } else {
                     val addr = InetSocketAddress(packet.address, packet.port)
                     val data = packet.data.copyOfRange(0, packet.length)
-                    FileLogger.i(TAG, "modulo: routing non-discovery packet (type=$packetType) from $addr to handleData")
+                    if (verbose) FileLogger.i(TAG, "modulo: routing non-discovery packet (type=$packetType) from $addr to handleData")
                     handleData(socket, data, addr)
                 }
             } catch (e: SocketException) {
@@ -212,7 +212,7 @@ class UdpfsSocketServer(
         peer.lastSeenMs = System.currentTimeMillis()
 
         val payload = peer.connection.processIncoming(data)
-        if (isNewPeer) {
+        if (isNewPeer && verbose) {
             FileLogger.d(TAG, "[$addr]: processIncoming -> payload=${if (payload == null) "null (ctrl packet, e.g. ACK/NACK)" else "${payload.size} bytes hex=${FileLogger.hex(payload)}"}")
         }
         if (payload != null) {
@@ -229,7 +229,7 @@ class UdpfsSocketServer(
             val writeTo: (InetSocketAddress, ByteArray) -> Unit = { a, payload ->
                 try {
                     socket.send(DatagramPacket(payload, payload.size, a.address, a.port))
-                    FileLogger.d(TAG, "sent to $a len=${payload.size} hex=${FileLogger.hex(payload)}")
+                    if (verbose) FileLogger.d(TAG, "sent to $a len=${payload.size} hex=${FileLogger.hex(payload)}")
                 } catch (e: Exception) {
                     FileLogger.w(TAG, "write error to $a", e)
                 }
