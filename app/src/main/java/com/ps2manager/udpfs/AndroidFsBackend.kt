@@ -24,6 +24,10 @@ class AndroidFsBackend(private val rootDir: File) : UdpfsBackend {
     private sealed class Handle {
         class RegularFile(val raf: RandomAccessFile, var writeState: WriteState? = null) : Handle()
         class Directory(val entries: MutableList<File>, var index: Int = 0) : Handle()
+        // Read-only: backs a virtual "GAME.ISO" that's actually GAME.zso on
+        // disk. position mimics RandomAccessFile.filePointer, since ZsoFile
+        // itself is a random-access decompressor with no notion of a cursor.
+        class CompressedIso(val zso: ZsoFile, var position: Long = 0L) : Handle()
     }
     private class WriteState(var chunksReceived: Int = 0, var totalChunks: Int = 0)
 
@@ -40,8 +44,18 @@ class AndroidFsBackend(private val rootDir: File) : UdpfsBackend {
         return target
     }
 
+    /** Transparent ZSO decompression: if the client asks for "GAME.ISO" and
+     *  no such file exists, but "GAME.zso" does, serve that instead — the
+     *  PS2 client only ever sees a plain ISO by name and by content. */
+    private fun resolveWithZso(path: String): File {
+        val direct = resolve(path)
+        if (direct.exists() || !direct.name.endsWith(".iso", ignoreCase = true)) return direct
+        val zsoCandidate = File(direct.parentFile, direct.name.dropLast(4) + ".zso")
+        return if (zsoCandidate.exists()) zsoCandidate else direct
+    }
+
     override fun open(path: String, flags: Int, isDir: Boolean): OpenResult {
-        val file = resolve(path)
+        val file = if (isDir) resolve(path) else resolveWithZso(path)
 
         if (isDir) {
             if (!file.exists() || !file.isDirectory) throw UdpfsErrno(Errno.ENOENT)
@@ -49,6 +63,16 @@ class AndroidFsBackend(private val rootDir: File) : UdpfsBackend {
             val h = nextHandle.getAndIncrement()
             handles[h] = Handle.Directory(entries)
             return OpenResult(h, statFor(file))
+        }
+
+        if (ZsoFile.isZso(file)) {
+            if (!file.exists()) throw UdpfsErrno(Errno.ENOENT)
+            val writable = (flags and 0x03) != UdpfsFlag.READ_ONLY
+            if (writable) throw UdpfsErrno(Errno.EACCES) // compressed images are read-only
+            val zso = ZsoFile(file)
+            val h = nextHandle.getAndIncrement()
+            handles[h] = Handle.CompressedIso(zso)
+            return OpenResult(h, statFor(file, zso.totalSize))
         }
 
         val create = (flags and UdpfsFlag.CREATE) != 0
@@ -74,22 +98,35 @@ class AndroidFsBackend(private val rootDir: File) : UdpfsBackend {
     override fun close(handle: Int) {
         when (val h = handles.remove(handle)) {
             is Handle.RegularFile -> h.raf.close()
+            is Handle.CompressedIso -> h.zso.close()
             is Handle.Directory -> { }
             null -> throw UdpfsErrno(Errno.EBADF)
         }
     }
 
     override fun read(handle: Int, size: Int, readBuffer: ByteArray): ReadResult {
-        val h = handles[handle] as? Handle.RegularFile ?: throw UdpfsErrno(Errno.EBADF)
-        val toRead = minOf(size, readBuffer.size)
-        val n = h.raf.read(readBuffer, 0, toRead)
-        if (n <= 0) return ReadResult(0, ByteArray(0))
-        return ReadResult(n, readBuffer.copyOf(n))
+        when (val h = handles[handle]) {
+            is Handle.RegularFile -> {
+                val toRead = minOf(size, readBuffer.size)
+                val n = h.raf.read(readBuffer, 0, toRead)
+                if (n <= 0) return ReadResult(0, ByteArray(0))
+                return ReadResult(n, readBuffer.copyOf(n))
+            }
+            is Handle.CompressedIso -> {
+                val toRead = minOf(size, readBuffer.size)
+                val data = h.zso.readAt(h.position, toRead)
+                h.position += data.size
+                return ReadResult(data.size, data)
+            }
+            else -> throw UdpfsErrno(Errno.EBADF)
+        }
     }
 
     override fun writeStart(handle: Int) {
-        val h = handles[handle] as? Handle.RegularFile ?: throw UdpfsErrno(Errno.EBADF)
-        h.writeState = WriteState()
+        val h = handles[handle]
+        if (h is Handle.CompressedIso) throw UdpfsErrno(Errno.EACCES)
+        val rf = h as? Handle.RegularFile ?: throw UdpfsErrno(Errno.EBADF)
+        rf.writeState = WriteState()
     }
 
     override fun writeChunk(handle: Int, chunkNr: Int, chunkSize: Int, totalChunks: Int, chunk: ByteArray): Boolean {
@@ -109,16 +146,31 @@ class AndroidFsBackend(private val rootDir: File) : UdpfsBackend {
     }
 
     override fun lseek(handle: Int, offset: Long, whence: Int): Long {
-        val h = handles[handle] as? Handle.RegularFile ?: throw UdpfsErrno(Errno.EBADF)
-        val newPos = when (whence) {
-            0 -> offset
-            1 -> h.raf.filePointer + offset
-            2 -> h.raf.length() + offset
-            else -> throw UdpfsErrno(Errno.EINVAL)
+        when (val h = handles[handle]) {
+            is Handle.RegularFile -> {
+                val newPos = when (whence) {
+                    0 -> offset
+                    1 -> h.raf.filePointer + offset
+                    2 -> h.raf.length() + offset
+                    else -> throw UdpfsErrno(Errno.EINVAL)
+                }
+                if (newPos < 0) throw UdpfsErrno(Errno.EINVAL)
+                h.raf.seek(newPos)
+                return newPos
+            }
+            is Handle.CompressedIso -> {
+                val newPos = when (whence) {
+                    0 -> offset
+                    1 -> h.position + offset
+                    2 -> h.zso.totalSize + offset
+                    else -> throw UdpfsErrno(Errno.EINVAL)
+                }
+                if (newPos < 0) throw UdpfsErrno(Errno.EINVAL)
+                h.position = newPos
+                return newPos
+            }
+            else -> throw UdpfsErrno(Errno.EBADF)
         }
-        if (newPos < 0) throw UdpfsErrno(Errno.EINVAL)
-        h.raf.seek(newPos)
-        return newPos
     }
 
     override fun dread(handle: Int): DreadEntry? {
@@ -126,12 +178,27 @@ class AndroidFsBackend(private val rootDir: File) : UdpfsBackend {
         if (h.index >= h.entries.size) return null
         val f = h.entries[h.index]
         h.index++
+        // Transparent ZSO: present "GAME.zso" to the client as "GAME.ISO"
+        // with its decompressed size, unless a real GAME.ISO also exists
+        // (in which case that real file wins and we don't double-list it).
+        if (ZsoFile.isZso(f)) {
+            val isoName = f.name.dropLast(4) + ".ISO"
+            val realIso = File(f.parentFile, isoName)
+            if (!realIso.exists()) {
+                val size = ZsoFile.peekTotalBytes(f)
+                if (size != null) return DreadEntry(isoName, statFor(f, size))
+            }
+        }
         return DreadEntry(f.name, statFor(f))
     }
 
     override fun getstat(path: String): StatInfo {
-        val file = resolve(path)
+        val file = resolveWithZso(path)
         if (!file.exists()) throw UdpfsErrno(Errno.ENOENT)
+        if (ZsoFile.isZso(file)) {
+            val size = ZsoFile.peekTotalBytes(file) ?: throw UdpfsErrno(Errno.EIO)
+            return statFor(file, size)
+        }
         return statFor(file)
     }
 
@@ -154,24 +221,39 @@ class AndroidFsBackend(private val rootDir: File) : UdpfsBackend {
     }
 
     override fun bread(handle: Int, sectorNr: Long, sectorCount: Int, readBuffer: ByteArray): ByteArray {
-        val h = handles[handle] as? Handle.RegularFile ?: throw UdpfsErrno(Errno.EBADF)
         val offset = sectorNr * SECTOR_SIZE
         val requested = sectorCount.toLong() * SECTOR_SIZE
-        val remaining = h.raf.length() - offset
-        if (remaining <= 0) return ByteArray(0)
-        val toRead = minOf(requested, remaining, readBuffer.size.toLong()).toInt()
-        h.raf.seek(offset)
-        val n = h.raf.read(readBuffer, 0, toRead)
-        if (n <= 0) return ByteArray(0)
-        return readBuffer.copyOf(n)
+        when (val h = handles[handle]) {
+            is Handle.RegularFile -> {
+                val remaining = h.raf.length() - offset
+                if (remaining <= 0) return ByteArray(0)
+                val toRead = minOf(requested, remaining, readBuffer.size.toLong()).toInt()
+                h.raf.seek(offset)
+                val n = h.raf.read(readBuffer, 0, toRead)
+                if (n <= 0) return ByteArray(0)
+                return readBuffer.copyOf(n)
+            }
+            is Handle.CompressedIso -> {
+                val remaining = h.zso.totalSize - offset
+                if (remaining <= 0) return ByteArray(0)
+                val toRead = minOf(requested, remaining, readBuffer.size.toLong()).toInt()
+                return h.zso.readAt(offset, toRead)
+            }
+            else -> throw UdpfsErrno(Errno.EBADF)
+        }
     }
 
     override fun bwriteStart(handle: Int, sectorNr: Long, sectorCount: Int) {
-        val h = handles[handle] as? Handle.RegularFile ?: throw UdpfsErrno(Errno.EBADF)
-        h.raf.seek(sectorNr * SECTOR_SIZE)
-        h.writeState = WriteState()
+        val h = handles[handle]
+        if (h is Handle.CompressedIso) throw UdpfsErrno(Errno.EACCES)
+        val rf = h as? Handle.RegularFile ?: throw UdpfsErrno(Errno.EBADF)
+        rf.raf.seek(sectorNr * SECTOR_SIZE)
+        rf.writeState = WriteState()
     }
 
     private fun statFor(file: File): StatInfo =
         StatInfo.fromFile(file.isDirectory, if (file.isDirectory) 0L else file.length(), file.lastModified())
+
+    private fun statFor(file: File, sizeOverride: Long): StatInfo =
+        StatInfo.fromFile(file.isDirectory, sizeOverride, file.lastModified())
 }
