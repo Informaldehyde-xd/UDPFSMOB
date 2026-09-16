@@ -17,9 +17,9 @@ package com.ps2manager.udpfsserver.udpfs
 import java.io.File
 import java.io.RandomAccessFile
 
-class ZsoFile(file: File) {
+class ZsoFile(file: File) : CompressedImage {
     private val raf = RandomAccessFile(file, "r")
-    val totalSize: Long
+    override val totalSize: Long
     private val blockSize: Int
     private val align: Int
     private val index: IntArray // numBlocks+1 entries, raw (with plain-bit still set)
@@ -51,7 +51,7 @@ class ZsoFile(file: File) {
 
     /** Reads up to `length` decompressed bytes starting at `position`.
      *  Returns fewer bytes only at EOF, matching RandomAccessFile.read semantics. */
-    fun readAt(position: Long, length: Int): ByteArray {
+    override fun readAt(position: Long, length: Int): ByteArray {
         if (position < 0 || position >= totalSize || length <= 0) return ByteArray(0)
         val toRead = minOf(length.toLong(), totalSize - position).toInt()
         val out = ByteArray(toRead)
@@ -69,7 +69,7 @@ class ZsoFile(file: File) {
         return out
     }
 
-    fun close() {
+    override fun close() {
         raf.close()
     }
 

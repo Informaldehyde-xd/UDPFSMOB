@@ -24,10 +24,11 @@ class AndroidFsBackend(private val rootDir: File) : UdpfsBackend {
     private sealed class Handle {
         class RegularFile(val raf: RandomAccessFile, var writeState: WriteState? = null) : Handle()
         class Directory(val entries: MutableList<File>, var index: Int = 0) : Handle()
-        // Read-only: backs a virtual "GAME.ISO" that's actually GAME.zso on
-        // disk. position mimics RandomAccessFile.filePointer, since ZsoFile
-        // itself is a random-access decompressor with no notion of a cursor.
-        class CompressedIso(val zso: ZsoFile, var position: Long = 0L) : Handle()
+        // Read-only: backs a virtual "GAME.ISO" that's actually GAME.zso or
+        // GAME.chd on disk. position mimics RandomAccessFile.filePointer,
+        // since a CompressedImage is a random-access decompressor with no
+        // notion of a cursor of its own.
+        class CompressedIso(val image: CompressedImage, var position: Long = 0L) : Handle()
     }
     private class WriteState(var chunksReceived: Int = 0, var totalChunks: Int = 0)
 
@@ -44,18 +45,37 @@ class AndroidFsBackend(private val rootDir: File) : UdpfsBackend {
         return target
     }
 
-    /** Transparent ZSO decompression: if the client asks for "GAME.ISO" and
-     *  no such file exists, but "GAME.zso" does, serve that instead — the
-     *  PS2 client only ever sees a plain ISO by name and by content. */
-    private fun resolveWithZso(path: String): File {
+    /** Transparent ZSO/CHD decompression: if the client asks for "GAME.ISO"
+     *  and no such file exists, but "GAME.zso" or "GAME.chd" does, serve
+     *  that instead — the PS2 client only ever sees a plain ISO by name
+     *  and by content. Prefers .zso if both happen to exist. */
+    private fun resolveVirtualIso(path: String): File {
         val direct = resolve(path)
         if (direct.exists() || !direct.name.endsWith(".iso", ignoreCase = true)) return direct
-        val zsoCandidate = File(direct.parentFile, direct.name.dropLast(4) + ".zso")
-        return if (zsoCandidate.exists()) zsoCandidate else direct
+        val base = direct.name.dropLast(4)
+        val zsoCandidate = File(direct.parentFile, "$base.zso")
+        if (zsoCandidate.exists()) return zsoCandidate
+        val chdCandidate = File(direct.parentFile, "$base.chd")
+        if (chdCandidate.exists()) return chdCandidate
+        return direct
+    }
+
+    private fun openCompressedImage(file: File): CompressedImage = when {
+        ZsoFile.isZso(file) -> ZsoFile(file)
+        ChdFile.isChd(file) -> ChdFile(file)
+        else -> throw UdpfsErrno(Errno.EIO) // unreachable given the callers' guards
+    }
+
+    private fun isCompressedImage(file: File): Boolean = ZsoFile.isZso(file) || ChdFile.isChd(file)
+
+    private fun peekCompressedTotalBytes(file: File): Long? = when {
+        ZsoFile.isZso(file) -> ZsoFile.peekTotalBytes(file)
+        ChdFile.isChd(file) -> ChdFile.peekTotalBytes(file)
+        else -> null
     }
 
     override fun open(path: String, flags: Int, isDir: Boolean): OpenResult {
-        val file = if (isDir) resolve(path) else resolveWithZso(path)
+        val file = if (isDir) resolve(path) else resolveVirtualIso(path)
 
         if (isDir) {
             if (!file.exists() || !file.isDirectory) throw UdpfsErrno(Errno.ENOENT)
@@ -65,14 +85,14 @@ class AndroidFsBackend(private val rootDir: File) : UdpfsBackend {
             return OpenResult(h, statFor(file))
         }
 
-        if (ZsoFile.isZso(file)) {
+        if (isCompressedImage(file)) {
             if (!file.exists()) throw UdpfsErrno(Errno.ENOENT)
             val writable = (flags and 0x03) != UdpfsFlag.READ_ONLY
             if (writable) throw UdpfsErrno(Errno.EACCES) // compressed images are read-only
-            val zso = ZsoFile(file)
+            val image = openCompressedImage(file)
             val h = nextHandle.getAndIncrement()
-            handles[h] = Handle.CompressedIso(zso)
-            return OpenResult(h, statFor(file, zso.totalSize))
+            handles[h] = Handle.CompressedIso(image)
+            return OpenResult(h, statFor(file, image.totalSize))
         }
 
         val create = (flags and UdpfsFlag.CREATE) != 0
@@ -98,7 +118,7 @@ class AndroidFsBackend(private val rootDir: File) : UdpfsBackend {
     override fun close(handle: Int) {
         when (val h = handles.remove(handle)) {
             is Handle.RegularFile -> h.raf.close()
-            is Handle.CompressedIso -> h.zso.close()
+            is Handle.CompressedIso -> h.image.close()
             is Handle.Directory -> { }
             null -> throw UdpfsErrno(Errno.EBADF)
         }
@@ -114,7 +134,7 @@ class AndroidFsBackend(private val rootDir: File) : UdpfsBackend {
             }
             is Handle.CompressedIso -> {
                 val toRead = minOf(size, readBuffer.size)
-                val data = h.zso.readAt(h.position, toRead)
+                val data = h.image.readAt(h.position, toRead)
                 h.position += data.size
                 return ReadResult(data.size, data)
             }
@@ -162,7 +182,7 @@ class AndroidFsBackend(private val rootDir: File) : UdpfsBackend {
                 val newPos = when (whence) {
                     0 -> offset
                     1 -> h.position + offset
-                    2 -> h.zso.totalSize + offset
+                    2 -> h.image.totalSize + offset
                     else -> throw UdpfsErrno(Errno.EINVAL)
                 }
                 if (newPos < 0) throw UdpfsErrno(Errno.EINVAL)
@@ -178,14 +198,15 @@ class AndroidFsBackend(private val rootDir: File) : UdpfsBackend {
         if (h.index >= h.entries.size) return null
         val f = h.entries[h.index]
         h.index++
-        // Transparent ZSO: present "GAME.zso" to the client as "GAME.ISO"
-        // with its decompressed size, unless a real GAME.ISO also exists
-        // (in which case that real file wins and we don't double-list it).
-        if (ZsoFile.isZso(f)) {
+        // Transparent ZSO/CHD: present "GAME.zso"/"GAME.chd" to the client
+        // as "GAME.ISO" with its decompressed size, unless a real GAME.ISO
+        // also exists (in which case that real file wins and we don't
+        // double-list it).
+        if (isCompressedImage(f)) {
             val isoName = f.name.dropLast(4) + ".ISO"
             val realIso = File(f.parentFile, isoName)
             if (!realIso.exists()) {
-                val size = ZsoFile.peekTotalBytes(f)
+                val size = peekCompressedTotalBytes(f)
                 if (size != null) return DreadEntry(isoName, statFor(f, size))
             }
         }
@@ -193,10 +214,10 @@ class AndroidFsBackend(private val rootDir: File) : UdpfsBackend {
     }
 
     override fun getstat(path: String): StatInfo {
-        val file = resolveWithZso(path)
+        val file = resolveVirtualIso(path)
         if (!file.exists()) throw UdpfsErrno(Errno.ENOENT)
-        if (ZsoFile.isZso(file)) {
-            val size = ZsoFile.peekTotalBytes(file) ?: throw UdpfsErrno(Errno.EIO)
+        if (isCompressedImage(file)) {
+            val size = peekCompressedTotalBytes(file) ?: throw UdpfsErrno(Errno.EIO)
             return statFor(file, size)
         }
         return statFor(file)
@@ -234,10 +255,10 @@ class AndroidFsBackend(private val rootDir: File) : UdpfsBackend {
                 return readBuffer.copyOf(n)
             }
             is Handle.CompressedIso -> {
-                val remaining = h.zso.totalSize - offset
+                val remaining = h.image.totalSize - offset
                 if (remaining <= 0) return ByteArray(0)
                 val toRead = minOf(requested, remaining, readBuffer.size.toLong()).toInt()
-                return h.zso.readAt(offset, toRead)
+                return h.image.readAt(offset, toRead)
             }
             else -> throw UdpfsErrno(Errno.EBADF)
         }
