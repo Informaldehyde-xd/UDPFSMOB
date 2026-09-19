@@ -67,6 +67,7 @@ class UdpfsHandlers(
             conn.addHandle(result.handle, path, flags, isDir)
             conn.sendOpenReply(result.handle, result.stat)
         } catch (e: Exception) {
+            FileLogger.w(TAG, "[${conn.peerAddr}]: OPEN failed for '$path' (flags=$flags isDir=$isDir)", e)
             conn.sendOpenReply(-errorToErrno(e), StatInfo())
         }
     }
@@ -92,6 +93,7 @@ class UdpfsHandlers(
             val result = backend.read(handle, size, conn.dataBuffer)
             conn.sendReadResult(result.n, result.data)
         } catch (e: Exception) {
+            FileLogger.w(TAG, "[${conn.peerAddr}]: READ failed handle=$handle size=$size", e)
             conn.sendReadResult(-errorToErrno(e), null)
         }
     }
@@ -148,6 +150,7 @@ class UdpfsHandlers(
         try {
             conn.sendLseekReply(backend.lseek(handle, offset, whence))
         } catch (e: Exception) {
+            FileLogger.w(TAG, "[${conn.peerAddr}]: LSEEK failed handle=$handle offset=$offset whence=$whence", e)
             conn.sendLseekReply(-1)
         }
     }
@@ -160,6 +163,7 @@ class UdpfsHandlers(
             if (entry == null) conn.sendDreadReply(0, "", StatInfo())
             else conn.sendDreadReply(1, entry.name, entry.stat)
         } catch (e: Exception) {
+            FileLogger.w(TAG, "[${conn.peerAddr}]: DREAD failed handle=$handle", e)
             conn.sendDreadReply(-errorToErrno(e), "", StatInfo())
         }
     }
@@ -170,6 +174,7 @@ class UdpfsHandlers(
         try {
             conn.sendGetstatReply(0, backend.getstat(path))
         } catch (e: Exception) {
+            FileLogger.w(TAG, "[${conn.peerAddr}]: GETSTAT failed for '$path'", e)
             conn.sendGetstatReply(-errorToErrno(e), StatInfo())
         }
     }
