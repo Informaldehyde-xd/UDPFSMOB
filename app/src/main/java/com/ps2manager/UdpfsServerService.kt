@@ -239,6 +239,7 @@ class UdpfsServerService : Service() {
         } catch (e: Exception) {
             Log.e(TAG, "Error releasing locks on destroy", e)
         }
+        _status.value = _status.value.copy(state = UdpfsServerState.STOPPED)
         
         super.onDestroy()
     }
