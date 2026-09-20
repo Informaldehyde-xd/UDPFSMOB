@@ -39,11 +39,16 @@ class MainActivity : ComponentActivity() {
                                     startService(intent)
                                 }
                             } catch (e: Exception) {
-                                launchError = "${e.javaClass.simpleName}: ${e.message}"
+                                launchError = "UDPFS Launch Error: ${e.javaClass.simpleName}: ${e.message}"
                             }
                         },
                         onStopServer = {
-                            stopService(Intent(this, UdpfsServerService::class.java))
+                            try {
+                                launchError = null
+                                stopService(Intent(this, UdpfsServerService::class.java))
+                            } catch (e: Exception) {
+                                launchError = "UDPFS Stop Error: ${e.javaClass.simpleName}: ${e.message}"
+                            }
                         },
                         onStartUdpBdServer = {
                             try {
@@ -55,11 +60,16 @@ class MainActivity : ComponentActivity() {
                                     startService(intent)
                                 }
                             } catch (e: Exception) {
-                                launchError = "${e.javaClass.simpleName}: ${e.message}"
+                                launchError = "UDPBD Launch Error: ${e.javaClass.simpleName}: ${e.message}"
                             }
                         },
                         onStopUdpBdServer = {
-                            stopService(Intent(this, UdpBdServerService::class.java))
+                            try {
+                                launchError = null
+                                stopService(Intent(this, UdpBdServerService::class.java))
+                            } catch (e: Exception) {
+                                launchError = "UDPBD Stop Error: ${e.javaClass.simpleName}: ${e.message}"
+                            }
                         }
                     )
                 }
@@ -96,18 +106,23 @@ fun UdpfsControllerScreen(
     var moduloMode by remember { mutableStateOf(SettingsManager.getModuloMode(context)) }
     var showShareBrowser by remember { mutableStateOf(false) }
 
-    val ipValid = SettingsManager.isValidIp(bindIp)
+    // Explicitly allow empty/blank IP inputs (binds to all interfaces)
+    val ipValid = bindIp.isBlank() || SettingsManager.isValidIp(bindIp)
     val settingsValid = ipValid && sharePath.isNotBlank()
     val isRunning = status.state == UdpfsServerState.RUNNING || status.state == UdpfsServerState.STARTING
+    val canStop = status.state != UdpfsServerState.STOPPED
 
     var udpBdImagePath by remember { mutableStateOf(SettingsManager.getUdpBdImagePath(context)) }
     var udpBdBindIp by remember { mutableStateOf(SettingsManager.getUdpBdBindIp(context)) }
     var udpBdVerbose by remember { mutableStateOf(SettingsManager.getUdpBdVerboseLogging(context)) }
     var showImageBrowser by remember { mutableStateOf(false) }
     val udpBdStatus by UdpBdServerService.status.collectAsState()
-    val udpBdIpValid = SettingsManager.isValidIp(udpBdBindIp)
+
+    // Explicitly allow empty/blank IP inputs (binds to all interfaces)
+    val udpBdIpValid = udpBdBindIp.isBlank() || SettingsManager.isValidIp(udpBdBindIp)
     val udpBdSettingsValid = udpBdIpValid && udpBdImagePath.isNotBlank()
     val udpBdIsRunning = udpBdStatus.state == UdpBdServerState.RUNNING || udpBdStatus.state == UdpBdServerState.STARTING
+    val udpBdCanStop = udpBdStatus.state != UdpBdServerState.STOPPED
 
     val saveUdpBdSettings: () -> Unit = {
         SettingsManager.setUdpBdImagePath(context, udpBdImagePath)
@@ -135,7 +150,7 @@ fun UdpfsControllerScreen(
         if (launchError != null) {
             Spacer(modifier = Modifier.height(8.dp))
             Text(
-                "Failed to launch: $launchError",
+                "Error: $launchError",
                 color = MaterialTheme.colorScheme.error,
                 style = MaterialTheme.typography.bodySmall
             )
@@ -215,7 +230,7 @@ fun UdpfsControllerScreen(
 
         Button(
             onClick = onStopServer,
-            enabled = isRunning,
+            enabled = canStop,
             modifier = Modifier.fillMaxWidth(),
             colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
         ) {
@@ -291,7 +306,7 @@ fun UdpfsControllerScreen(
 
         Button(
             onClick = onStopUdpBdServer,
-            enabled = udpBdIsRunning,
+            enabled = udpBdCanStop,
             modifier = Modifier.fillMaxWidth(),
             colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
         ) {
