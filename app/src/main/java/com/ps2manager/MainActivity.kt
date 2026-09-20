@@ -94,6 +94,7 @@ fun UdpfsControllerScreen(
     var bindIp by remember { mutableStateOf(SettingsManager.getBindIp(context)) }
     var verbose by remember { mutableStateOf(SettingsManager.getVerboseLogging(context)) }
     var moduloMode by remember { mutableStateOf(SettingsManager.getModuloMode(context)) }
+    var showShareBrowser by remember { mutableStateOf(false) }
 
     val ipValid = SettingsManager.isValidIp(bindIp)
     val settingsValid = ipValid && sharePath.isNotBlank()
@@ -102,6 +103,7 @@ fun UdpfsControllerScreen(
     var udpBdImagePath by remember { mutableStateOf(SettingsManager.getUdpBdImagePath(context)) }
     var udpBdBindIp by remember { mutableStateOf(SettingsManager.getUdpBdBindIp(context)) }
     var udpBdVerbose by remember { mutableStateOf(SettingsManager.getUdpBdVerboseLogging(context)) }
+    var showImageBrowser by remember { mutableStateOf(false) }
     val udpBdStatus by UdpBdServerService.status.collectAsState()
     val udpBdIpValid = SettingsManager.isValidIp(udpBdBindIp)
     val udpBdSettingsValid = udpBdIpValid && udpBdImagePath.isNotBlank()
@@ -148,14 +150,20 @@ fun UdpfsControllerScreen(
         Text("Settings", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
         Spacer(modifier = Modifier.height(8.dp))
 
-        OutlinedTextField(
-            value = sharePath,
-            onValueChange = { sharePath = it },
-            label = { Text("Share Folder Path") },
-            singleLine = true,
-            enabled = !isRunning,
-            modifier = Modifier.fillMaxWidth()
-        )
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+            OutlinedTextField(
+                value = sharePath,
+                onValueChange = { sharePath = it },
+                label = { Text("Share Folder Path") },
+                singleLine = true,
+                enabled = !isRunning,
+                modifier = Modifier.weight(1f)
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            OutlinedButton(onClick = { showShareBrowser = true }, enabled = !isRunning) {
+                Text("Browse…")
+            }
+        }
         Spacer(modifier = Modifier.height(8.dp))
 
         OutlinedTextField(
@@ -224,15 +232,21 @@ fun UdpfsControllerScreen(
         Text("Settings", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
         Spacer(modifier = Modifier.height(8.dp))
 
-        OutlinedTextField(
-            value = udpBdImagePath,
-            onValueChange = { udpBdImagePath = it },
-            label = { Text(".img File Path") },
-            supportingText = { Text("Raw disk image created via the Termux .img guide") },
-            singleLine = true,
-            enabled = !udpBdIsRunning,
-            modifier = Modifier.fillMaxWidth()
-        )
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+            OutlinedTextField(
+                value = udpBdImagePath,
+                onValueChange = { udpBdImagePath = it },
+                label = { Text(".img File Path") },
+                supportingText = { Text("Raw disk image created via the Termux .img guide") },
+                singleLine = true,
+                enabled = !udpBdIsRunning,
+                modifier = Modifier.weight(1f)
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            OutlinedButton(onClick = { showImageBrowser = true }, enabled = !udpBdIsRunning) {
+                Text("Browse…")
+            }
+        }
         Spacer(modifier = Modifier.height(8.dp))
 
         OutlinedTextField(
@@ -283,6 +297,24 @@ fun UdpfsControllerScreen(
         ) {
             Text("Stop Server")
         }
+    }
+
+    if (showShareBrowser) {
+        StorageBrowserDialog(
+            mode = PickerMode.FOLDER,
+            initialPath = sharePath,
+            onDismiss = { showShareBrowser = false },
+            onSelect = { path -> sharePath = path; showShareBrowser = false }
+        )
+    }
+
+    if (showImageBrowser) {
+        StorageBrowserDialog(
+            mode = PickerMode.FILE,
+            initialPath = udpBdImagePath,
+            onDismiss = { showImageBrowser = false },
+            onSelect = { path -> udpBdImagePath = path; showImageBrowser = false }
+        )
     }
 }
 
