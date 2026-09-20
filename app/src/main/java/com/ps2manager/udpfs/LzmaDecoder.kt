@@ -81,7 +81,12 @@ object LzmaDecoder {
                 var symbol = 1
                 if (state >= 7) {
                     // "matched" literal: bias decode against the byte at the rep0 distance
-                    var matchByte = out[outPos - rep0 - 1].toInt() and 0xFF
+                    val matchSrc = outPos - rep0 - 1
+                    check(matchSrc in 0 until outLen) {
+                        "LZMA matched-literal references out-of-range offset $matchSrc (outPos=$outPos " +
+                            "rep0=$rep0 outLen=$outLen) — corrupt or misaligned hunk data"
+                    }
+                    var matchByte = out[matchSrc].toInt() and 0xFF
                     do {
                         val matchBit = (matchByte ushr 7) and 1
                         matchByte = (matchByte shl 1) and 0xFF
@@ -107,7 +112,12 @@ object LzmaDecoder {
                     if (rc.decodeBit(isRep0Long, state) == 0) {
                         // short rep: single byte, no length decode
                         state = if (state < 7) 9 else 11
-                        out[outPos] = out[outPos - rep0 - 1]
+                        val srcPos = outPos - rep0 - 1
+                        check(srcPos in 0 until outLen) {
+                            "LZMA short-rep references out-of-range offset $srcPos (outPos=$outPos " +
+                                "rep0=$rep0 outLen=$outLen) — corrupt or misaligned hunk data"
+                        }
+                        out[outPos] = out[srcPos]
                         outPos++
                         continue
                     }
@@ -137,21 +147,37 @@ object LzmaDecoder {
 
                 val lenState = minOf(len - MATCH_MIN_LEN, 3)
                 val posSlot = bitTreeDecode(rc, posSlotDecoders[lenState], NUM_POS_SLOT_BITS)
+                // Computed in Long throughout: for a large posSlot, (2|bit) shl numDirectBits
+                // can reach 30 bits, which silently overflows/wraps negative in 32-bit Int
+                // arithmetic — exactly the kind of bug that turns into a wild negative array
+                // index below. Narrow to Int only after validating the result is sane.
+                val newRep0: Long
                 if (posSlot < START_POS_MODEL_INDEX) {
-                    rep0 = posSlot
+                    newRep0 = posSlot.toLong()
                 } else {
                     val numDirectBits = (posSlot ushr 1) - 1
-                    rep0 = (2 or (posSlot and 1)) shl numDirectBits
-                    if (posSlot < END_POS_MODEL_INDEX) {
-                        rep0 += bitTreeReverseDecode(rc, posDecoders, rep0 - posSlot, numDirectBits)
+                    var dist = (2L or (posSlot and 1).toLong()) shl numDirectBits
+                    dist += if (posSlot < END_POS_MODEL_INDEX) {
+                        bitTreeReverseDecode(rc, posDecoders, (dist - posSlot).toInt(), numDirectBits).toLong()
                     } else {
-                        rep0 += (rc.decodeDirectBits(numDirectBits - NUM_ALIGN_BITS) shl NUM_ALIGN_BITS).toInt()
-                        rep0 += bitTreeReverseDecode(rc, alignDecoder, 0, NUM_ALIGN_BITS)
+                        (rc.decodeDirectBits(numDirectBits - NUM_ALIGN_BITS) shl NUM_ALIGN_BITS) +
+                            bitTreeReverseDecode(rc, alignDecoder, 0, NUM_ALIGN_BITS).toLong()
                     }
+                    newRep0 = dist
                 }
+                check(newRep0 in 0 until outLen.toLong()) {
+                    "LZMA stream decoded an impossible match distance $newRep0 (outPos=$outPos " +
+                        "outLen=$outLen posSlot=$posSlot) — corrupt or misaligned hunk data"
+                }
+                rep0 = newRep0.toInt()
             }
 
-            var srcPos = outPos - rep0 - 1
+            val srcPos0 = outPos - rep0 - 1
+            check(srcPos0 in 0 until outLen) {
+                "LZMA match references out-of-range offset $srcPos0 (outPos=$outPos rep0=$rep0 " +
+                    "len=$len outLen=$outLen) — corrupt or misaligned hunk data"
+            }
+            var srcPos = srcPos0
             var remaining = len
             while (remaining > 0 && outPos < outLen) {
                 out[outPos] = out[srcPos]

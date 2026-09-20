@@ -16,6 +16,7 @@
  * guessing at output. */
 package com.ps2manager.udpfsserver.udpfs
 
+import com.ps2manager.udpfsserver.FileLogger
 import java.io.File
 import java.io.RandomAccessFile
 import java.util.zip.Inflater
@@ -53,6 +54,11 @@ class ChdFile(file: File) : CompressedImage {
         hunkOffset = LongArray(hunkCount)
         hunkLength = IntArray(hunkCount)
         decompressV5Map(mapOffset)
+        FileLogger.i(TAG, "opened ${file.name}: totalSize=$totalSize hunkBytes=$hunkBytes hunkCount=$hunkCount " +
+            "compressors=[${compressors.joinToString(",") { fourccName(it) }}] mapOffset=$mapOffset")
+        FileLogger.i(TAG, "first 20 hunks: " + (0 until minOf(20, hunkCount)).joinToString(" ") { h ->
+            "$h:${hunkCompType[h]}@${hunkOffset[h]}+${hunkLength[h]}"
+        })
     }
 
     private fun decompressV5Map(mapOffset: Long) {
@@ -198,13 +204,22 @@ class ChdFile(file: File) : CompressedImage {
                 val fourcc = compressors[slot]
                 val compData = ByteArray(hunkLength[hunkIdx])
                 synchronized(raf) { raf.seek(hunkOffset[hunkIdx]); raf.readFully(compData) }
-                when (fourcc) {
-                    CODEC_ZLIB -> inflate(compData, realUncompLen)
-                    CODEC_LZMA -> LzmaDecoder.decompress(compData, realUncompLen)
-                    else -> error(
-                        "unsupported CHD hunk codec '${fourccName(fourcc)}' — only none/self/zlib/lzma " +
-                            "are supported (hunk $hunkIdx)"
-                    )
+                FileLogger.d(TAG, "decoding hunk $hunkIdx: type=$type codec=${fourccName(fourcc)} " +
+                    "offset=${hunkOffset[hunkIdx]} compLen=${compData.size} outLen=$realUncompLen " +
+                    "first16=${compData.copyOf(minOf(16, compData.size)).joinToString(" ") { "%02X".format(it) }}")
+                try {
+                    when (fourcc) {
+                        CODEC_ZLIB -> inflate(compData, realUncompLen)
+                        CODEC_LZMA -> LzmaDecoder.decompress(compData, realUncompLen)
+                        else -> error(
+                            "unsupported CHD hunk codec '${fourccName(fourcc)}' — only none/self/zlib/lzma " +
+                                "are supported (hunk $hunkIdx)"
+                        )
+                    }
+                } catch (e: Exception) {
+                    FileLogger.e(TAG, "hunk $hunkIdx decode failed: codec=${fourccName(fourcc)} " +
+                        "offset=${hunkOffset[hunkIdx]} compLen=${compData.size} outLen=$realUncompLen", e)
+                    throw e
                 }
             }
             COMPRESSION_PARENT -> error("hunk $hunkIdx requires a parent CHD, which is not supported")
@@ -227,6 +242,7 @@ class ChdFile(file: File) : CompressedImage {
     }
 
     companion object {
+        private const val TAG = "ChdFile"
         private const val HEADER_SIZE = 124
 
         private const val COMPRESSION_TYPE_0 = 0
